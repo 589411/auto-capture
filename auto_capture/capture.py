@@ -458,7 +458,7 @@ class CaptureSession:
             Quartz.CGEventTapEnable(self._tap, True)
 
         print(f"🎬 開始錄製 ({self.owner or 'PID ' + str(self.pid)}, window ID: {self.initial_window_id})")
-        print(f"📁 輸出目錄: {self.output_dir}")
+        print(f"📁 輸出目錄: {self.output_dir.resolve()}")
         if not self.manual_only:
             print("🖱️  點擊滑鼠自動截圖")
         print("⌨️  按 Ctrl+C 停止\n")
@@ -478,9 +478,12 @@ class CaptureSession:
 
     def stop(self):
         """Stop the capture session."""
+        if not self._running:
+            return  # already stopped, avoid duplicate messages
         self._running = False
         if self._tap:
             Quartz.CGEventTapEnable(self._tap, False)
             Quartz.CFRunLoopStop(Quartz.CFRunLoopGetCurrent())
             self._tap = None
         print(f"\n✅ 錄製結束，共擷取 {self._counter} 張截圖")
+        print(f"📁 檔案位置：{self.output_dir.resolve()}/")

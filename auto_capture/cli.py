@@ -287,7 +287,8 @@ def main(argv: list[str] | None = None):
             except Exception as e:
                 print(f"⚠️  標註失敗: {e}")
 
-        print(f"📸 {path.name}" + (f"  @ ({click_pos[0]:.0f}, {click_pos[1]:.0f})" if click_pos else "  (手動)"))
+        pos_info = f"  @ ({click_pos[0]:.0f}, {click_pos[1]:.0f})" if click_pos else "  (手動)"
+        print(f"📸 {path.resolve()}{pos_info}")
 
     # Create and run session
     session = CaptureSession(
@@ -318,10 +319,17 @@ def main(argv: list[str] | None = None):
     print(f"  ─────────────────────────────────────────────")
     print()
 
-    # Handle Ctrl+C gracefully
+    # Handle Ctrl+C gracefully — session.start() already calls stop() in finally
     def signal_handler(sig, frame):
-        session.stop()
-        sys.exit(0)
+        Quartz_CFRunLoopStop_safe()
+
+    def Quartz_CFRunLoopStop_safe():
+        """Stop the run loop so start()'s finally block handles cleanup."""
+        try:
+            import Quartz as _Q
+            _Q.CFRunLoopStop(_Q.CFRunLoopGetCurrent())
+        except Exception:
+            pass
 
     signal.signal(signal.SIGINT, signal_handler)
 
