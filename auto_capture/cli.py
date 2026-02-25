@@ -26,11 +26,44 @@ def print_windows():
         print(f"{win['window_id']:>10}  {win['owner']:<30}  {win['name']}")
 
 
+BANNER = r"""
+  ╔══════════════════════════════════════════════════════╗
+  ║              🎯 auto-capture v{version}                ║
+  ║     macOS 自動截圖工具 — 點擊即截圖，附標註框       ║
+  ╚══════════════════════════════════════════════════════╝
+""".strip()
+
+EXAMPLES = """
+使用範例：
+  auto-capture --list-windows                          列出可用視窗
+  auto-capture -w "Chrome" -o ~/Desktop/captures/      擷取 Chrome 視窗
+  auto-capture -w "OpenClaw" -o ./out/ --manual-only   僅手動截圖（不監聽點擊）
+  auto-capture -w "Finder" --no-annotate               不加標註框
+  auto-capture -w "Safari" --box-color "#00FF00"       綠色標註框
+  auto-capture -w "Arc" --delay 300                    點擊後等 300ms 再截圖
+
+搭配 LaunchDock 使用：
+  auto-capture -w "OpenClaw" -o ~/Desktop/captures/deploy-openclaw-cloud/
+  cd ~/Documents/github/launchdock
+  ./scripts/add-image.sh deploy-openclaw-cloud ~/Desktop/captures/deploy-openclaw-cloud/*.png
+""".strip()
+
+
+class CustomHelpFormatter(argparse.RawDescriptionHelpFormatter):
+    """Custom formatter that shows banner + examples."""
+
+    def _format_usage(self, usage, actions, groups, prefix):
+        return ""
+
+
 def main(argv: list[str] | None = None):
     """Main CLI entry point."""
+    epilog = f"\n{EXAMPLES}"
     parser = argparse.ArgumentParser(
         prog="auto-capture",
-        description="macOS 自動截圖工具 — 點擊時自動擷取視窗截圖並標註",
+        description=BANNER.format(version=__version__) + "\n\n  macOS 自動截圖工具 — 點擊時自動擷取視窗截圖並標註",
+        epilog=epilog,
+        formatter_class=CustomHelpFormatter,
     )
     parser.add_argument("--version", "-V", action="version", version=f"%(prog)s {__version__}")
 
@@ -88,6 +121,20 @@ def main(argv: list[str] | None = None):
     )
 
     args = parser.parse_args(argv)
+
+    # 無參數時顯示互動式提示
+    if len(sys.argv) == 1 and argv is None:
+        print(BANNER.format(version=__version__))
+        print()
+        print("  💡 快速開始：")
+        print("  ─────────────────────────────────────────────")
+        print("  1. 先列出可用視窗：  auto-capture --list-windows")
+        print("  2. 開始錄製：        auto-capture -w \"視窗名稱\" -o 輸出目錄/")
+        print("  3. 點擊滑鼠自動截圖，按 Ctrl+C 停止")
+        print()
+        print("  📖 完整說明：        auto-capture --help")
+        print()
+        sys.exit(0)
 
     # --list-windows mode
     if args.list_windows:
@@ -149,6 +196,23 @@ def main(argv: list[str] | None = None):
         manual_only=args.manual_only,
         on_capture=on_capture,
     )
+
+    # 開始前顯示設定摘要
+    print()
+    print(BANNER.format(version=__version__))
+    print()
+    print(f"  📋 設定摘要")
+    print(f"  ─────────────────────────────────────────────")
+    print(f"  🪟 目標視窗：    {args.window or f'ID {window_id}'} (ID: {window_id})")
+    print(f"  📁 輸出目錄：    {output_dir.resolve()}")
+    print(f"  🖱️  觸發模式：    {'僅手動 (hotkey)' if args.manual_only else '自動 (滑鼠點擊) + 手動'}")
+    print(f"  🎨 標註框：      {'關閉' if not config.annotation.enabled else f'{config.annotation.color} {config.annotation.shape} {config.annotation.size}px'}")
+    print(f"  ⏱️  延遲：        {config.capture.delay_ms}ms")
+    print(f"  📷 格式：        {config.capture.format}")
+    print()
+    print(f"  ⌨️  按 Ctrl+C 停止錄製")
+    print(f"  ─────────────────────────────────────────────")
+    print()
 
     # Handle Ctrl+C gracefully
     def signal_handler(sig, frame):
