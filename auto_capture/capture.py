@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Callable
 
 import Quartz
-from AppKit import NSWorkspace
+from AppKit import NSWorkspace, NSRunningApplication
 from Quartz import (
     CGEventGetLocation,
     CGEventMaskBit,
@@ -17,27 +17,122 @@ from Quartz import (
     kCGNullWindowID,
     kCGWindowListOptionOnScreenOnly,
     kCGWindowOwnerName,
+    kCGWindowOwnerPID,
     kCGWindowNumber,
     kCGWindowName,
+    kCGWindowBounds,
+    kCGWindowLayer,
 )
 
+# Try to import AX API (needs pyobjc-framework-ApplicationServices)
+try:
+    from ApplicationServices import (
+        AXUIElementCreateApplication,
+        AXUIElementCopyAttributeValue,
+    )
+    _HAS_AX = True
+except ImportError:
+    _HAS_AX = False
 
-def list_windows() -> list[dict]:
+
+# System processes that should be hidden from interactive selection
+_SYSTEM_OWNERS = {
+    "控制中心", "Window Server", "Dock", "Spotlight", "SystemUIServer",
+    "TextInputMenuAgent", "WindowManager", "loginwindow",
+    "Notification Center", "通知中心", "背景圖片",
+}
+
+
+def _get_ax_window_titles(pid: int) -> list[str]:
+    """Try to get window titles via Accessibility API for a given PID.
+
+    Returns list of window titles (may be empty if no AX permission or module).
+    """
+    if not _HAS_AX:
+        return []
+    try:
+        app_ref = AXUIElementCreateApplication(pid)
+        err, windows = AXUIElementCopyAttributeValue(
+            app_ref, "AXWindows", None
+        )
+        if err != 0 or not windows:
+            return []
+        titles = []
+        for win in windows:
+            err, title = AXUIElementCopyAttributeValue(win, "AXTitle", None)
+            if err == 0 and title:
+                titles.append(str(title))
+            else:
+                titles.append("")
+        return titles
+    except Exception:
+        return []
+
+
+def list_windows(include_system: bool = False) -> list[dict]:
     """List all on-screen windows with owner name, window name, and window ID.
 
+    Attempts to get window titles via Accessibility API for better display.
+    Falls back to CGWindow info if unavailable.
+
+    Args:
+        include_system: If True, include system/background windows.
+
     Returns:
-        List of dicts with keys: owner, name, window_id
+        List of dicts with keys: owner, name, window_id, bounds, pid
     """
     window_list = CGWindowListCopyWindowInfo(
         kCGWindowListOptionOnScreenOnly, kCGNullWindowID
     )
+
+    # Collect AX titles per PID (cache to avoid repeated queries)
+    pid_titles: dict[int, list[str]] = {}
+    pid_title_idx: dict[int, int] = {}
+
     results = []
     for win in window_list:
         owner = win.get(kCGWindowOwnerName, "")
-        name = win.get(kCGWindowName, "")
+        cg_name = win.get(kCGWindowName, "")
         wid = win.get(kCGWindowNumber, 0)
-        if owner and wid:
-            results.append({"owner": owner, "name": name or "", "window_id": int(wid)})
+        pid = win.get(kCGWindowOwnerPID, 0)
+        bounds = win.get(kCGWindowBounds, {})
+        layer = win.get(kCGWindowLayer, 0)
+
+        if not owner or not wid:
+            continue
+        if not include_system and owner in _SYSTEM_OWNERS:
+            continue
+        # Skip background layer windows (layer 0 = normal windows)
+        if not include_system and layer != 0:
+            continue
+
+        # Try to get a better name via AX API
+        name = cg_name
+        if not name and pid:
+            if pid not in pid_titles:
+                pid_titles[pid] = _get_ax_window_titles(pid)
+                pid_title_idx[pid] = 0
+            ax_titles = pid_titles[pid]
+            idx = pid_title_idx[pid]
+            if idx < len(ax_titles) and ax_titles[idx]:
+                name = ax_titles[idx]
+            pid_title_idx[pid] = idx + 1
+
+        # Build bounds info for display
+        w = int(bounds.get("Width", 0))
+        h = int(bounds.get("Height", 0))
+        x = int(bounds.get("X", 0))
+        y = int(bounds.get("Y", 0))
+        bounds_str = f"{w}x{h} @ ({x},{y})" if w and h else ""
+
+        results.append({
+            "owner": owner,
+            "name": name or "",
+            "window_id": int(wid),
+            "pid": pid,
+            "bounds": bounds_str,
+        })
+
     return results
 
 

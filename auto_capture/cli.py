@@ -13,9 +13,9 @@ from .capture import CaptureSession, find_window_id, list_windows
 from .config import Config
 
 
-def print_windows():
+def print_windows(include_system: bool = False):
     """Print all available windows."""
-    windows = list_windows()
+    windows = list_windows(include_system=include_system)
     if not windows:
         print("找不到任何視窗。")
         return
@@ -24,6 +24,64 @@ def print_windows():
     print("-" * 70)
     for win in windows:
         print(f"{win['window_id']:>10}  {win['owner']:<30}  {win['name']}")
+
+
+def interactive_select_window() -> dict | None:
+    """Show an interactive numbered window list and let user pick one.
+
+    Returns:
+        Selected window dict, or None if cancelled.
+    """
+    windows = list_windows(include_system=False)
+    if not windows:
+        print("找不到任何可用視窗。")
+        return None
+
+    # Group display: show each window with index
+    print("  🪟 可用視窗：")
+    print("  ─────────────────────────────────────────────────────────────────")
+    print(f"  {'#':>4}  {'應用程式':<20} {'視窗標題':<30} {'大小'}")
+    print(f"  {'':>4}  {'':─<20} {'':─<30} {'':─<16}")
+
+    for i, win in enumerate(windows, 1):
+        owner = win['owner']
+        name = win['name']
+        bounds = win.get('bounds', '')
+        # Truncate long names
+        if len(owner) > 18:
+            owner = owner[:16] + '…'
+        display_name = name if name else '(未命名)'
+        if len(display_name) > 28:
+            display_name = display_name[:26] + '…'
+        print(f"  {i:>4}  {owner:<20} {display_name:<30} {bounds}")
+
+    print()
+    print(f"  共 {len(windows)} 個視窗（已過濾系統視窗）")
+    print()
+
+    while True:
+        try:
+            raw = input("  輸入編號選擇視窗（q 取消）: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return None
+
+        if raw.lower() in ('q', 'quit', 'exit', ''):
+            return None
+
+        try:
+            idx = int(raw)
+        except ValueError:
+            print(f"  ⚠️  請輸入數字 1-{len(windows)}")
+            continue
+
+        if 1 <= idx <= len(windows):
+            selected = windows[idx - 1]
+            name_display = selected['name'] or '(未命名)'
+            print(f"  ✅ 已選擇：{selected['owner']} — {name_display} (ID: {selected['window_id']})")
+            return selected
+        else:
+            print(f"  ⚠️  請輸入 1-{len(windows)} 之間的數字")
 
 
 BANNER = r"""
@@ -122,19 +180,12 @@ def main(argv: list[str] | None = None):
 
     args = parser.parse_args(argv)
 
-    # 無參數時顯示互動式提示
-    if len(sys.argv) == 1 and argv is None:
+    # 無參數時進入互動模式
+    is_interactive = (len(sys.argv) == 1 and argv is None)
+
+    if is_interactive:
         print(BANNER.format(version=__version__))
         print()
-        print("  💡 快速開始：")
-        print("  ─────────────────────────────────────────────")
-        print("  1. 先列出可用視窗：  auto-capture --list-windows")
-        print("  2. 開始錄製：        auto-capture -w \"視窗名稱\" -o 輸出目錄/")
-        print("  3. 點擊滑鼠自動截圖，按 Ctrl+C 停止")
-        print()
-        print("  📖 完整說明：        auto-capture --help")
-        print()
-        sys.exit(0)
 
     # --list-windows mode
     if args.list_windows:
@@ -159,17 +210,47 @@ def main(argv: list[str] | None = None):
 
     # Resolve window ID
     window_id = args.window_id
-    if window_id is None:
-        if not args.window:
-            parser.error("必須指定 --window 或 --window-id")
+    window_display_name = None
+
+    if window_id is None and args.window:
         window_id = find_window_id(args.window)
         if window_id is None:
             print(f"❌ 找不到符合「{args.window}」的視窗。")
-            print("可用視窗：")
-            print_windows()
+            print()
+            # Fall through to interactive selection
+
+    if window_id is None:
+        # Interactive window selection
+        if not sys.stdin.isatty():
+            print("❌ 必須指定 --window 或 --window-id（非互動模式）")
             sys.exit(1)
 
+        if not is_interactive:
+            print(BANNER.format(version=__version__))
+            print()
+
+        selected = interactive_select_window()
+        if selected is None:
+            print("  👋 已取消")
+            sys.exit(0)
+        window_id = selected["window_id"]
+        window_display_name = f"{selected['owner']} — {selected['name'] or '(未命名)'}"
+        print()
+
+    if window_display_name is None:
+        window_display_name = args.window or f"ID {window_id}"
+
     output_dir = Path(args.output)
+
+    # 互動模式下詢問輸出目錄
+    if is_interactive:
+        try:
+            raw_dir = input(f"  📁 輸出目錄（Enter 使用預設 {output_dir}）: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\n  👋 已取消")
+            sys.exit(0)
+        if raw_dir:
+            output_dir = Path(raw_dir).expanduser()
 
     # Callback: annotate after capture
     def on_capture(path: Path, click_pos: tuple[float, float] | None):
@@ -203,7 +284,7 @@ def main(argv: list[str] | None = None):
     print()
     print(f"  📋 設定摘要")
     print(f"  ─────────────────────────────────────────────")
-    print(f"  🪟 目標視窗：    {args.window or f'ID {window_id}'} (ID: {window_id})")
+    print(f"  🪟 目標視窗：    {window_display_name} (ID: {window_id})")
     print(f"  📁 輸出目錄：    {output_dir.resolve()}")
     print(f"  🖱️  觸發模式：    {'僅手動 (hotkey)' if args.manual_only else '自動 (滑鼠點擊) + 手動'}")
     print(f"  🎨 標註框：      {'關閉' if not config.annotation.enabled else f'{config.annotation.color} {config.annotation.shape} {config.annotation.size}px'}")
