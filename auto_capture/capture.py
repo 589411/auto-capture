@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 from typing import Callable
 
 import Quartz
-from AppKit import NSWorkspace, NSRunningApplication
+from AppKit import NSScreen, NSWorkspace, NSRunningApplication
 from Quartz import (
     CGEventGetLocation,
     CGEventMaskBit,
@@ -207,8 +208,34 @@ def find_all_windows_for_pid(pid: int) -> list[int]:
     return results
 
 
+def _get_window_bounds(window_id: int) -> dict | None:
+    """Get the bounds dict for a window ID.
+
+    Returns:
+        Dict with X, Y, Width, Height or None.
+    """
+    window_list = CGWindowListCopyWindowInfo(
+        kCGWindowListOptionOnScreenOnly, kCGNullWindowID
+    )
+    for win in window_list:
+        if win.get(kCGWindowNumber, 0) == window_id:
+            bounds = win.get(kCGWindowBounds, {})
+            if bounds:
+                return {
+                    "x": int(bounds.get("X", 0)),
+                    "y": int(bounds.get("Y", 0)),
+                    "w": int(bounds.get("Width", 0)),
+                    "h": int(bounds.get("Height", 0)),
+                }
+    return None
+
+
 def capture_window(window_id: int, output_path: Path, fmt: str = "png") -> Path:
-    """Capture a specific window using macOS screencapture.
+    """Capture a specific window using the best available method.
+
+    Tries in order:
+    1. screencapture -l (cleanest, needs Screen Recording permission)
+    2. Full-screen capture + crop to window bounds (fallback)
 
     Args:
         window_id: The CGWindowID to capture.
@@ -219,22 +246,67 @@ def capture_window(window_id: int, output_path: Path, fmt: str = "png") -> Path:
         Path to the saved screenshot.
 
     Raises:
-        RuntimeError: If screencapture fails.
+        RuntimeError: If all capture methods fail.
     """
     output_path = output_path.with_suffix(f".{fmt}")
+
+    # Method 1: screencapture -l (preferred — cleanest, captures window only)
     cmd = ["screencapture", "-l", str(window_id), "-o", "-x", str(output_path)]
-    # -l <windowID>: capture specific window
-    # -o: no shadow
-    # -x: no sound
-
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
-    if result.returncode != 0:
-        raise RuntimeError(f"screencapture failed: {result.stderr}")
+    if result.returncode == 0 and output_path.exists() and output_path.stat().st_size > 0:
+        return output_path
 
-    if not output_path.exists():
-        raise RuntimeError(f"Screenshot not saved: {output_path}")
+    # screencapture -l failed (likely missing Screen Recording permission on macOS 15+)
+    # Clean up empty/failed file
+    output_path.unlink(missing_ok=True)
 
-    return output_path
+    # Method 2: Full-screen capture + crop to window bounds
+    bounds = _get_window_bounds(window_id)
+    if bounds is None:
+        raise RuntimeError(
+            f"無法擷取視窗 (ID: {window_id})。\n"
+            "請授予「螢幕錄製」權限：系統設定 → 隱私與安全性 → 螢幕錄製 → 勾選你的終端機 app"
+        )
+
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+        tmp_path = tmp.name
+
+    try:
+        result = subprocess.run(
+            ["screencapture", "-x", tmp_path],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode != 0 or not Path(tmp_path).exists():
+            raise RuntimeError(
+                "全螢幕截圖也失敗了。請確認「螢幕錄製」權限已授予。"
+            )
+
+        from PIL import Image as PILImage
+
+        full_img = PILImage.open(tmp_path)
+        full_w, _full_h = full_img.size
+
+        # Detect Retina scale: compare pixel width to screen point width
+        screen = NSScreen.mainScreen()
+        screen_pt_w = int(screen.frame().size.width) if screen else full_w
+        scale = round(full_w / screen_pt_w) if screen_pt_w else 1
+        if scale < 1:
+            scale = 1
+
+        # Crop to window bounds (convert points → pixels)
+        x = bounds["x"] * scale
+        y = bounds["y"] * scale
+        w = bounds["w"] * scale
+        h = bounds["h"] * scale
+
+        cropped = full_img.crop((x, y, x + w, y + h))
+        cropped.save(output_path)
+        full_img.close()
+
+        return output_path
+
+    finally:
+        Path(tmp_path).unlink(missing_ok=True)
 
 
 class CaptureSession:
