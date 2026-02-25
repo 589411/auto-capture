@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 from . import __version__
-from .annotate import annotate_click, get_window_origin
+from .annotate import annotate_click
 from .capture import CaptureSession, find_window_id, list_windows, find_frontmost_window_for_pid
 from .config import Config
 
@@ -93,15 +93,16 @@ BANNER = r"""
 
 EXAMPLES = """
 使用範例：
-  auto-capture --list-windows                          列出可用視窗
-  auto-capture -w "Chrome" -o ~/Desktop/captures/      擷取 Chrome 視窗
-  auto-capture -w "OpenClaw" -o ./out/ --manual-only   僅手動截圖（不監聽點擊）
-  auto-capture -w "Finder" --no-annotate               不加標註框
-  auto-capture -w "Safari" --box-color "#00FF00"       綠色標註框
-  auto-capture -w "Arc" --delay 300                    點擊後等 300ms 再截圖
+  auto-capture                                         全螢幕截圖（預設）
+  auto-capture -o ~/Desktop/captures/                   指定輸出目錄
+  auto-capture --no-annotate                            不加標註框
+  auto-capture --box-color "#00FF00"                    綠色標註框
+  auto-capture --delay 300                              點擊後等 300ms 再截圖
+  auto-capture --window "Chrome"                        只擷取特定視窗
+  auto-capture --list-windows                           列出可用視窗
 
 搭配 LaunchDock 使用：
-  auto-capture -w "OpenClaw" -o ~/Desktop/captures/deploy-openclaw-cloud/
+  auto-capture -o ~/Desktop/captures/deploy-openclaw-cloud/
   cd ~/Documents/github/launchdock
   ./scripts/add-image.sh deploy-openclaw-cloud ~/Desktop/captures/deploy-openclaw-cloud/*.png
 """.strip()
@@ -127,7 +128,7 @@ def main(argv: list[str] | None = None):
 
     parser.add_argument(
         "--window", "-w",
-        help="目標視窗名稱（模糊比對 owner 或 window name）",
+        help="擷取特定視窗（模糊比對名稱）。不指定則截全螢幕",
     )
     parser.add_argument(
         "--window-id",
@@ -208,14 +209,18 @@ def main(argv: list[str] | None = None):
     if args.format:
         config.capture.format = args.format
 
-    # Resolve window ID + track PID & owner for re-resolution
-    window_id = args.window_id
+    # Determine capture mode: fullscreen (default) or window-specific
+    use_fullscreen = True
+    window_id = args.window_id or 0
     window_pid = 0
     window_owner = ""
-    window_display_name = None
+    window_display_name = "全螢幕"
 
-    if window_id is None and args.window:
-        # Find by name, also grab PID
+    if args.window_id:
+        use_fullscreen = False
+        window_display_name = f"Window ID {args.window_id}"
+    elif args.window:
+        use_fullscreen = False
         windows = list_windows()
         query = args.window.lower()
         for win in windows:
@@ -224,40 +229,18 @@ def main(argv: list[str] | None = None):
                 window_pid = win.get("pid", 0)
                 window_owner = win["owner"]
                 break
-        if window_id is None:
+        if not window_id:
             for win in windows:
                 if query in win["owner"].lower() or query in win["name"].lower():
                     window_id = win["window_id"]
                     window_pid = win.get("pid", 0)
                     window_owner = win["owner"]
                     break
-        if window_id is None:
-            print(f"❌ 找不到符合「{args.window}」的視窗。")
-            print()
-            # Fall through to interactive selection
-
-    if window_id is None:
-        # Interactive window selection
-        if not sys.stdin.isatty():
-            print("❌ 必須指定 --window 或 --window-id（非互動模式）")
-            sys.exit(1)
-
-        if not is_interactive:
-            print(BANNER.format(version=__version__))
-            print()
-
-        selected = interactive_select_window()
-        if selected is None:
-            print("  👋 已取消")
-            sys.exit(0)
-        window_id = selected["window_id"]
-        window_pid = selected.get("pid", 0)
-        window_owner = selected["owner"]
-        window_display_name = f"{selected['owner']} — {selected['name'] or '(未命名)'}"
-        print()
-
-    if window_display_name is None:
-        window_display_name = args.window or f"ID {window_id}"
+        if not window_id:
+            print(f"❌ 找不到符合「{args.window}」的視窗，改用全螢幕模式。")
+            use_fullscreen = True
+        else:
+            window_display_name = window_owner or f"ID {window_id}"
 
     output_dir = Path(args.output)
 
@@ -272,12 +255,16 @@ def main(argv: list[str] | None = None):
             output_dir = Path(raw_dir).expanduser()
 
     # Callback: annotate after capture
-    # Note: uses session.initial_window_id which auto-updates when window changes
     def on_capture(path: Path, click_pos: tuple[float, float] | None):
         if click_pos and config.annotation.enabled:
             try:
-                current_wid = session.initial_window_id
-                origin = get_window_origin(current_wid)
+                # Fullscreen: origin is (0, 0); window mode: get from window bounds
+                if session.fullscreen:
+                    origin = (0.0, 0.0)
+                else:
+                    from .annotate import get_window_origin
+                    current_wid = session.initial_window_id
+                    origin = get_window_origin(current_wid)
                 annotate_click(
                     image_path=path,
                     click_pos=click_pos,
@@ -292,10 +279,11 @@ def main(argv: list[str] | None = None):
 
     # Create and run session
     session = CaptureSession(
-        window_id=window_id,
         output_dir=output_dir,
+        window_id=window_id,
         pid=window_pid,
         owner=window_owner,
+        fullscreen=use_fullscreen,
         fmt=config.capture.format,
         delay_ms=config.capture.delay_ms,
         manual_only=args.manual_only,
@@ -308,7 +296,7 @@ def main(argv: list[str] | None = None):
     print()
     print(f"  📋 設定摘要")
     print(f"  ─────────────────────────────────────────────")
-    print(f"  🪟 目標視窗：    {window_display_name} (ID: {window_id})")
+    print(f"  🖥️  擷取模式：    {window_display_name}")
     print(f"  📁 輸出目錄：    {output_dir.resolve()}")
     print(f"  🖱️  觸發模式：    {'僅手動 (hotkey)' if args.manual_only else '自動 (滑鼠點擊) + 手動'}")
     print(f"  🎨 標註框：      {'關閉' if not config.annotation.enabled else f'{config.annotation.color} {config.annotation.shape} {config.annotation.size}px'}")

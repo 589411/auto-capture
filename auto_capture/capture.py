@@ -309,16 +309,38 @@ def capture_window(window_id: int, output_path: Path, fmt: str = "png") -> Path:
         Path(tmp_path).unlink(missing_ok=True)
 
 
+def capture_fullscreen(output_path: Path, fmt: str = "png") -> Path:
+    """Capture the entire screen (what the user actually sees).
+
+    Args:
+        output_path: Where to save the screenshot.
+        fmt: Image format (png or jpg).
+
+    Returns:
+        Path to the saved screenshot.
+
+    Raises:
+        RuntimeError: If screencapture fails.
+    """
+    output_path = output_path.with_suffix(f".{fmt}")
+    cmd = ["screencapture", "-x", str(output_path)]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+    if result.returncode != 0:
+        raise RuntimeError(f"全螢幕截圖失敗: {result.stderr}")
+    if not output_path.exists() or output_path.stat().st_size == 0:
+        raise RuntimeError("截圖產生空檔案，請確認「螢幕錄製」權限已授予。")
+    return output_path
+
+
 class CaptureSession:
     """Manages a capture session — listens for mouse clicks and captures screenshots.
 
-    Tracks the target app by PID (not window ID), so window changes
-    (new tabs, navigation, login) are handled automatically.
+    Supports two modes:
+    - fullscreen (default): captures the entire screen as the user sees it
+    - window: captures a specific window by ID (needs Screen Recording permission)
 
     Usage:
         session = CaptureSession(
-            window_id=12345,
-            pid=9876,
             output_dir=Path("./captures"),
             on_capture=lambda path, pos: print(f"Captured: {path}"),
         )
@@ -327,10 +349,11 @@ class CaptureSession:
 
     def __init__(
         self,
-        window_id: int,
         output_dir: Path,
+        window_id: int = 0,
         pid: int = 0,
         owner: str = "",
+        fullscreen: bool = True,
         fmt: str = "png",
         delay_ms: int = 100,
         manual_only: bool = False,
@@ -339,6 +362,7 @@ class CaptureSession:
         self.initial_window_id = window_id
         self.pid = pid
         self.owner = owner
+        self.fullscreen = fullscreen
         self.output_dir = output_dir
         self.fmt = fmt
         self.delay_ms = delay_ms
@@ -396,12 +420,15 @@ class CaptureSession:
         if self.delay_ms > 0:
             time.sleep(self.delay_ms / 1000.0)
 
-        wid = self._resolve_window_id()
-        if wid is None:
-            raise RuntimeError(f"找不到 {self.owner or 'PID ' + str(self.pid)} 的視窗（可能已關閉）")
-
         output_path = self._next_path()
-        result = capture_window(wid, output_path, self.fmt)
+
+        if self.fullscreen:
+            result = capture_fullscreen(output_path, self.fmt)
+        else:
+            wid = self._resolve_window_id()
+            if wid is None:
+                raise RuntimeError(f"找不到 {self.owner or 'PID ' + str(self.pid)} 的視窗（可能已關閉）")
+            result = capture_window(wid, output_path, self.fmt)
 
         if self.on_capture:
             self.on_capture(result, click_pos)
@@ -457,7 +484,8 @@ class CaptureSession:
             )
             Quartz.CGEventTapEnable(self._tap, True)
 
-        print(f"🎬 開始錄製 ({self.owner or 'PID ' + str(self.pid)}, window ID: {self.initial_window_id})")
+        mode_label = "全螢幕" if self.fullscreen else f"{self.owner or 'PID ' + str(self.pid)}, window ID: {self.initial_window_id}"
+        print(f"🎬 開始錄製（{mode_label}）")
         print(f"📁 輸出目錄: {self.output_dir.resolve()}")
         if not self.manual_only:
             print("🖱️  點擊滑鼠自動截圖")
