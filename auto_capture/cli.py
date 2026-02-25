@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 from . import __version__
-from .annotate import annotate_click
+from .annotate import annotate_click, create_zoom_gif
 from .capture import CaptureSession, find_window_id, list_windows, find_frontmost_window_for_pid
 from .config import Config
 
@@ -95,16 +95,21 @@ EXAMPLES = """
 使用範例：
   auto-capture                                         全螢幕截圖（預設）
   auto-capture -o ~/Desktop/captures/                   指定輸出目錄
-  auto-capture --no-annotate                            不加標註框
-  auto-capture --box-color "#00FF00"                    綠色標註框
+  auto-capture --no-annotate                            不加點擊標記
+  auto-capture --no-gif                                 不產生縮放 GIF
+  auto-capture --box-color "#00FF00"                    綠色點擊標記
   auto-capture --delay 300                              點擊後等 300ms 再截圖
   auto-capture --window "Chrome"                        只擷取特定視窗
   auto-capture --list-windows                           列出可用視窗
 
+每次點擊會產生：
+  001.png  — 全螢幕截圖（含點擊標記）
+  001.gif  — 從全螢幕縮放到點擊處的動畫
+
 搭配 LaunchDock 使用：
   auto-capture -o ~/Desktop/captures/deploy-openclaw-cloud/
   cd ~/Documents/github/launchdock
-  ./scripts/add-image.sh deploy-openclaw-cloud ~/Desktop/captures/deploy-openclaw-cloud/*.png
+  ./scripts/add-image.sh deploy-openclaw-cloud ~/Desktop/captures/deploy-openclaw-cloud/*.gif
 """.strip()
 
 
@@ -149,6 +154,11 @@ def main(argv: list[str] | None = None):
         "--no-annotate",
         action="store_true",
         help="不在截圖上加標註框",
+    )
+    parser.add_argument(
+        "--no-gif",
+        action="store_true",
+        help="不產生縮放動畫 GIF",
     )
     parser.add_argument(
         "--list-windows",
@@ -254,25 +264,44 @@ def main(argv: list[str] | None = None):
         if raw_dir:
             output_dir = Path(raw_dir).expanduser()
 
+    # Feature flags
+    generate_gif = not args.no_gif
+
     # Callback: annotate after capture
     def on_capture(path: Path, click_pos: tuple[float, float] | None):
-        if click_pos and config.annotation.enabled:
-            try:
-                # Fullscreen: origin is (0, 0); window mode: get from window bounds
-                if session.fullscreen:
-                    origin = (0.0, 0.0)
-                else:
-                    from .annotate import get_window_origin
-                    current_wid = session.initial_window_id
-                    origin = get_window_origin(current_wid)
-                annotate_click(
-                    image_path=path,
-                    click_pos=click_pos,
-                    window_origin=origin,
-                    config=config.annotation,
-                )
-            except Exception as e:
-                print(f"⚠️  標註失敗: {e}")
+        if click_pos:
+            # Determine origin
+            if session.fullscreen:
+                origin = (0.0, 0.0)
+            else:
+                from .annotate import get_window_origin
+                current_wid = session.initial_window_id
+                origin = get_window_origin(current_wid)
+
+            # 1) Draw click marker on the PNG
+            if config.annotation.enabled:
+                try:
+                    annotate_click(
+                        image_path=path,
+                        click_pos=click_pos,
+                        window_origin=origin,
+                        config=config.annotation,
+                    )
+                except Exception as e:
+                    print(f"⚠️  標註失敗: {e}")
+
+            # 2) Generate zoom-to-click GIF
+            if generate_gif:
+                try:
+                    gif_path = create_zoom_gif(
+                        image_path=path,
+                        click_pos=click_pos,
+                        window_origin=origin,
+                        color=config.annotation.color,
+                    )
+                    print(f"🎬 {gif_path.resolve()}")
+                except Exception as e:
+                    print(f"⚠️  GIF 生成失敗: {e}")
 
         pos_info = f"  @ ({click_pos[0]:.0f}, {click_pos[1]:.0f})" if click_pos else "  (手動)"
         print(f"📸 {path.resolve()}{pos_info}")
@@ -299,9 +328,10 @@ def main(argv: list[str] | None = None):
     print(f"  🖥️  擷取模式：    {window_display_name}")
     print(f"  📁 輸出目錄：    {output_dir.resolve()}")
     print(f"  🖱️  觸發模式：    {'僅手動 (hotkey)' if args.manual_only else '自動 (滑鼠點擊) + 手動'}")
-    print(f"  🎨 標註框：      {'關閉' if not config.annotation.enabled else f'{config.annotation.color} {config.annotation.shape} {config.annotation.size}px'}")
+    print(f"  🎨 點擊標記：    {'關閉' if not config.annotation.enabled else f'{config.annotation.color} 漣漪+準星'}")
+    print(f"  🎬 縮放 GIF：    {'開啟' if generate_gif else '關閉'}")
     print(f"  ⏱️  延遲：        {config.capture.delay_ms}ms")
-    print(f"  📷 格式：        {config.capture.format}")
+    print(f"  📷 格式：        {config.capture.format} + {'GIF' if generate_gif else ''}")
     print()
     print(f"  ⌨️  按 Ctrl+C 停止錄製")
     print(f"  ─────────────────────────────────────────────")
