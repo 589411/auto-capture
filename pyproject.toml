@@ -1,6 +1,6 @@
 [build-system]
 requires = ["setuptools>=68.0", "wheel"]
-build-backend = "setuptools.backends._legacy:_Backend"
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "auto-capture"
@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "macOS auto-screenshot tool — captures on mouse click with annotation"
 readme = "README.md"
 license = "MIT"
-requires-python = ">=3.10"
+requires-python = ">=3.9"
 authors = [
     { name = "LaunchDock Team" },
 ]
@@ -26,6 +26,7 @@ dependencies = [
     "pyobjc-framework-Quartz>=10.0",
     "Pillow>=10.0",
     "tomli>=2.0; python_version<'3.11'",
+    "typing_extensions>=4.0; python_version<'3.10'",
 ]
 
 [project.optional-dependencies]
@@ -41,7 +42,7 @@ auto-capture = "auto_capture.cli:main"
 include = ["auto_capture*"]
 
 [tool.ruff]
-target-version = "py310"
+target-version = "py39"
 line-length = 100
 
 [tool.ruff.lint]
