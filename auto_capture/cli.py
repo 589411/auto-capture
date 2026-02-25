@@ -11,6 +11,7 @@ from . import __version__
 from .annotate import annotate_click, create_zoom_gif
 from .capture import CaptureSession, find_window_id, list_windows, find_frontmost_window_for_pid
 from .config import Config
+from .redact import redact_image
 
 
 def print_windows(include_system: bool = False):
@@ -95,6 +96,7 @@ EXAMPLES = """
 使用範例：
   auto-capture                                         全螢幕截圖（預設）
   auto-capture -o ~/Desktop/captures/                   指定輸出目錄
+  auto-capture --redact                                 自動遮蔽敏感資訊
   auto-capture --no-annotate                            不加點擊標記
   auto-capture --no-gif                                 不產生縮放 GIF
   auto-capture --box-color "#00FF00"                    綠色點擊標記
@@ -106,8 +108,14 @@ EXAMPLES = """
   001.png  — 全螢幕截圖（含點擊標記）
   001.gif  — 從全螢幕縮放到點擊處的動畫
 
+敏感資訊遮蔽（--redact）：
+  自動偵測信用卡號、API key、email 地址等，自動上馬賽克。
+  也可在 ~/.auto-capture.toml 設定預設開啟：
+    [redact]
+    enabled = true
+
 搭配 LaunchDock 使用：
-  auto-capture -o ~/Desktop/captures/deploy-openclaw-cloud/
+  auto-capture --redact -o ~/Desktop/captures/deploy-openclaw-cloud/
   cd ~/Documents/github/launchdock
   ./scripts/add-image.sh deploy-openclaw-cloud ~/Desktop/captures/deploy-openclaw-cloud/*.gif
 """.strip()
@@ -159,6 +167,16 @@ def main(argv: list[str] | None = None):
         "--no-gif",
         action="store_true",
         help="不產生縮放動畫 GIF",
+    )
+    parser.add_argument(
+        "--redact",
+        action="store_true",
+        help="啟用自動遮蔽敏感資訊（信用卡、API key、email 等）",
+    )
+    parser.add_argument(
+        "--no-redact",
+        action="store_true",
+        help="停用自動遮蔽（覆蓋設定檔）",
     )
     parser.add_argument(
         "--list-windows",
@@ -218,6 +236,10 @@ def main(argv: list[str] | None = None):
         config.capture.delay_ms = args.delay
     if args.format:
         config.capture.format = args.format
+    if args.redact:
+        config.redact.enabled = True
+    if args.no_redact:
+        config.redact.enabled = False
 
     # Determine capture mode: fullscreen (default) or window-specific
     use_fullscreen = True
@@ -269,6 +291,16 @@ def main(argv: list[str] | None = None):
 
     # Callback: annotate after capture
     def on_capture(path: Path, click_pos: tuple[float, float] | None):
+        # 0) Redact sensitive info (before annotation/GIF)
+        if config.redact.enabled:
+            try:
+                _, redacted = redact_image(path, config.redact)
+                if redacted:
+                    names = set(r.pattern_name for r in redacted)
+                    print(f"🔒 已遮蔽 {len(redacted)} 處敏感資訊（{', '.join(names)}）")
+            except Exception as e:
+                print(f"⚠️  遮蔽失敗: {e}")
+
         if click_pos:
             # Determine origin
             if session.fullscreen:
@@ -330,6 +362,10 @@ def main(argv: list[str] | None = None):
     print(f"  🖱️  觸發模式：    {'僅手動 (hotkey)' if args.manual_only else '自動 (滑鼠點擊) + 手動'}")
     print(f"  🎨 點擊標記：    {'關閉' if not config.annotation.enabled else f'{config.annotation.color} 漣漪+準星'}")
     print(f"  🎬 縮放 GIF：    {'開啟' if generate_gif else '關閉'}")
+    redact_label = '開啟' if config.redact.enabled else '關閉'
+    if config.redact.enabled and config.redact.disabled_patterns:
+        redact_label += f"（排除: {', '.join(config.redact.disabled_patterns)}）"
+    print(f"  🔒 敏感遮蔽：    {redact_label}")
     print(f"  ⏱️  延遲：        {config.capture.delay_ms}ms")
     print(f"  📷 格式：        {config.capture.format} + {'GIF' if generate_gif else ''}")
     print()
