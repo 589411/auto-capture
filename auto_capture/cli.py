@@ -9,7 +9,7 @@ from pathlib import Path
 
 from . import __version__
 from .annotate import annotate_click, get_window_origin
-from .capture import CaptureSession, find_window_id, list_windows
+from .capture import CaptureSession, find_window_id, list_windows, find_frontmost_window_for_pid
 from .config import Config
 
 
@@ -208,12 +208,29 @@ def main(argv: list[str] | None = None):
     if args.format:
         config.capture.format = args.format
 
-    # Resolve window ID
+    # Resolve window ID + track PID & owner for re-resolution
     window_id = args.window_id
+    window_pid = 0
+    window_owner = ""
     window_display_name = None
 
     if window_id is None and args.window:
-        window_id = find_window_id(args.window)
+        # Find by name, also grab PID
+        windows = list_windows()
+        query = args.window.lower()
+        for win in windows:
+            if win["owner"].lower() == query:
+                window_id = win["window_id"]
+                window_pid = win.get("pid", 0)
+                window_owner = win["owner"]
+                break
+        if window_id is None:
+            for win in windows:
+                if query in win["owner"].lower() or query in win["name"].lower():
+                    window_id = win["window_id"]
+                    window_pid = win.get("pid", 0)
+                    window_owner = win["owner"]
+                    break
         if window_id is None:
             print(f"❌ 找不到符合「{args.window}」的視窗。")
             print()
@@ -234,6 +251,8 @@ def main(argv: list[str] | None = None):
             print("  👋 已取消")
             sys.exit(0)
         window_id = selected["window_id"]
+        window_pid = selected.get("pid", 0)
+        window_owner = selected["owner"]
         window_display_name = f"{selected['owner']} — {selected['name'] or '(未命名)'}"
         print()
 
@@ -253,10 +272,12 @@ def main(argv: list[str] | None = None):
             output_dir = Path(raw_dir).expanduser()
 
     # Callback: annotate after capture
+    # Note: uses session.initial_window_id which auto-updates when window changes
     def on_capture(path: Path, click_pos: tuple[float, float] | None):
         if click_pos and config.annotation.enabled:
             try:
-                origin = get_window_origin(window_id)
+                current_wid = session.initial_window_id
+                origin = get_window_origin(current_wid)
                 annotate_click(
                     image_path=path,
                     click_pos=click_pos,
@@ -272,6 +293,8 @@ def main(argv: list[str] | None = None):
     session = CaptureSession(
         window_id=window_id,
         output_dir=output_dir,
+        pid=window_pid,
+        owner=window_owner,
         fmt=config.capture.format,
         delay_ms=config.capture.delay_ms,
         manual_only=args.manual_only,

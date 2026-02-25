@@ -161,6 +161,52 @@ def find_window_id(query: str) -> int | None:
     return None
 
 
+def find_frontmost_window_for_pid(pid: int) -> int | None:
+    """Find the frontmost (first listed) window ID for a given process.
+
+    CGWindowListCopyWindowInfo returns windows in front-to-back order,
+    so the first match for a PID is the frontmost window.
+
+    Args:
+        pid: Process ID to search for.
+
+    Returns:
+        Window ID if found, None otherwise.
+    """
+    window_list = CGWindowListCopyWindowInfo(
+        kCGWindowListOptionOnScreenOnly, kCGNullWindowID
+    )
+    for win in window_list:
+        w_pid = win.get(kCGWindowOwnerPID, 0)
+        wid = win.get(kCGWindowNumber, 0)
+        layer = win.get(kCGWindowLayer, 0)
+        if w_pid == pid and wid and layer == 0:
+            return int(wid)
+    return None
+
+
+def find_all_windows_for_pid(pid: int) -> list[int]:
+    """Find all window IDs for a given process.
+
+    Args:
+        pid: Process ID.
+
+    Returns:
+        List of window IDs (front-to-back order).
+    """
+    window_list = CGWindowListCopyWindowInfo(
+        kCGWindowListOptionOnScreenOnly, kCGNullWindowID
+    )
+    results = []
+    for win in window_list:
+        w_pid = win.get(kCGWindowOwnerPID, 0)
+        wid = win.get(kCGWindowNumber, 0)
+        layer = win.get(kCGWindowLayer, 0)
+        if w_pid == pid and wid and layer == 0:
+            results.append(int(wid))
+    return results
+
+
 def capture_window(window_id: int, output_path: Path, fmt: str = "png") -> Path:
     """Capture a specific window using macOS screencapture.
 
@@ -194,9 +240,13 @@ def capture_window(window_id: int, output_path: Path, fmt: str = "png") -> Path:
 class CaptureSession:
     """Manages a capture session — listens for mouse clicks and captures screenshots.
 
+    Tracks the target app by PID (not window ID), so window changes
+    (new tabs, navigation, login) are handled automatically.
+
     Usage:
         session = CaptureSession(
             window_id=12345,
+            pid=9876,
             output_dir=Path("./captures"),
             on_capture=lambda path, pos: print(f"Captured: {path}"),
         )
@@ -207,12 +257,16 @@ class CaptureSession:
         self,
         window_id: int,
         output_dir: Path,
+        pid: int = 0,
+        owner: str = "",
         fmt: str = "png",
         delay_ms: int = 100,
         manual_only: bool = False,
         on_capture: Callable[[Path, tuple[float, float] | None], None] | None = None,
     ):
-        self.window_id = window_id
+        self.initial_window_id = window_id
+        self.pid = pid
+        self.owner = owner
         self.output_dir = output_dir
         self.fmt = fmt
         self.delay_ms = delay_ms
@@ -235,6 +289,29 @@ class CaptureSession:
         self._counter += 1
         return self.output_dir / f"{self._counter:03d}.{self.fmt}"
 
+    def _resolve_window_id(self) -> int | None:
+        """Resolve current window ID, re-finding by PID if needed."""
+        # First try the known window ID
+        wid = self.initial_window_id
+        # Verify it still exists
+        window_list = CGWindowListCopyWindowInfo(
+            kCGWindowListOptionOnScreenOnly, kCGNullWindowID
+        )
+        for win in window_list:
+            if win.get(kCGWindowNumber, 0) == wid:
+                return wid
+
+        # Window ID is stale — re-find by PID
+        if self.pid:
+            new_wid = find_frontmost_window_for_pid(self.pid)
+            if new_wid:
+                if new_wid != self.initial_window_id:
+                    print(f"🔄 視窗已更新: ID {self.initial_window_id} → {new_wid}")
+                    self.initial_window_id = new_wid
+                return new_wid
+
+        return None
+
     def take_screenshot(self, click_pos: tuple[float, float] | None = None) -> Path:
         """Take a single screenshot.
 
@@ -247,8 +324,12 @@ class CaptureSession:
         if self.delay_ms > 0:
             time.sleep(self.delay_ms / 1000.0)
 
+        wid = self._resolve_window_id()
+        if wid is None:
+            raise RuntimeError(f"找不到 {self.owner or 'PID ' + str(self.pid)} 的視窗（可能已關閉）")
+
         output_path = self._next_path()
-        result = capture_window(self.window_id, output_path, self.fmt)
+        result = capture_window(wid, output_path, self.fmt)
 
         if self.on_capture:
             self.on_capture(result, click_pos)
@@ -304,7 +385,7 @@ class CaptureSession:
             )
             Quartz.CGEventTapEnable(self._tap, True)
 
-        print(f"🎬 開始錄製 (window ID: {self.window_id})")
+        print(f"🎬 開始錄製 ({self.owner or 'PID ' + str(self.pid)}, window ID: {self.initial_window_id})")
         print(f"📁 輸出目錄: {self.output_dir}")
         if not self.manual_only:
             print("🖱️  點擊滑鼠自動截圖")
